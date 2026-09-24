@@ -31,17 +31,25 @@ over HBM for Q+K. The existing kernel also has autotune commented out (fixed
 - `gdn_prefill_qkv_prepare_fwd_opt` — drop-in replacement for
   `gdn_prefill_qkv_prepare_fwd` using the fused kernel.
 
-## Results (H100, SM90, BF16, heads=16, D=128)
+## Results
 
-| config | original (2× norm) | optimized (fused) | speedup (norm only) |
-|---|---|---|---|
-| 1×8192 | 0.183 ms | 0.098 ms | 1.87× |
-| 2×4096 | 0.195 ms | 0.098 ms | 1.99× |
-| 4×4096 | 0.409 ms | 0.193 ms | 2.12× |
-| 8×2048 | 0.404 ms | 0.193 ms | 2.10× |
-| 16×1024 | 0.403 ms | 0.179 ms | 2.26× |
+### Fused QK L2-norm (H100, SM90, BF16, D=128)
 
-Correctness: max absolute diff = 0.00 (bit-identical at BF16) across all configs.
+Speedup varies with `T_eff` (total_tokens × num_heads):
+
+| T_eff range | speedup | typical config |
+|---|---|---|
+| ≤ 65k | **1.18–1.32×** | 1~4 seqs, L≤2048, H=16 |
+| 130k–262k | **1.03–1.20×** | 8+ seqs, L≥4096, H=16 |
+| ≥ 524k | **1.01–1.02×** | 16+ seqs, large batch |
+
+Key findings:
+- Small batch / short seq: fused kernel wins more (launch overhead dominates)
+- Large batch: memory bandwidth saturated, speedup converges to ~1.01×
+- GQA/GVA (H≠HV): speedup matches symmetric configs at same T_eff
+- Best application: prefill-heavy workloads with batch ≤ 8
+
+Correctness: max absolute diff = 0.00 (bit-identical at BF16) across 30+ shape configs.
 
 ## How to apply
 
