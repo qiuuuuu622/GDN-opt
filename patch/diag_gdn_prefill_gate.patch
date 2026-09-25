@@ -1,0 +1,83 @@
+--- a/python/sglang/srt/layers/attention/linear/gdn_backend.py
++++ b/python/sglang/srt/layers/attention/linear/gdn_backend.py
+@@ -190,6 +190,52 @@ def flashinfer_gdn_prefill_default(model_runner: ModelRunner) -> Optional[str]:
+     """FlashInfer for the narrow SM90/SM100 GDN prefill domains we validated, else None."""
+     sm_major = torch.cuda.get_device_capability()[0] if is_cuda() else 0
++
++    # ------------------------------------------------------------------
++    # DIAGNOSTIC: every branch below is a silent `return None`, which makes
++    # "why did prefill fall back to Triton?" undecidable from logs alone.
++    # GDN_PREFILL_GATE_DEBUG=1 prints each gate's value instead.
++    # Zero behavior change when unset.
++    # ------------------------------------------------------------------
++    import os as _os
++    _dbg = _os.environ.get("GDN_PREFILL_GATE_DEBUG") == "1"
++
++    def _gate(name, value, ok):
++        if _dbg:
++            rank0_log(
++                f"[gdn-gate] {name}={value!r} -> {'OK' if ok else 'BLOCK'}"
++            )
++        return ok
++
++    if _dbg:
++        rank0_log(
++            f"[gdn-gate] sm_major={sm_major} cuda={torch.version.cuda} "
++            f"prefill_backend={get_exec().mamba.linear_attn_prefill_backend!r} "
++            f"base_backend={get_exec().mamba.linear_attn_backend!r} "
++            f"deterministic={get_exec().deterministic.enable_deterministic_inference} "
++            f"page_major={get_memory().enable_page_major_kv_layout} "
++            f"dynamic_chunking={get_schedule().enable_dynamic_chunking} "
++            f"chunked_prefill_size={get_schedule().chunked_prefill_size!r}"
++        )
++
++    _gate("prefill_backend is None",
++          get_exec().mamba.linear_attn_prefill_backend,
++          get_exec().mamba.linear_attn_prefill_backend is None)
++    _gate("base_backend == triton",
++          get_exec().mamba.linear_attn_backend,
++          get_exec().mamba.linear_attn_backend == "triton")
++    _gate("not deterministic",
++          get_exec().deterministic.enable_deterministic_inference,
++          not get_exec().deterministic.enable_deterministic_inference)
++    _gate("not page_major",
++          get_memory().enable_page_major_kv_layout,
++          not get_memory().enable_page_major_kv_layout)
++    _gate("sm_major in (9,10)", sm_major, sm_major in (9, 10))
++
+     if (
+         get_exec().mamba.linear_attn_prefill_backend is not None
+         or get_exec().mamba.linear_attn_backend != "triton"
+@@ -210,6 +256,21 @@ def flashinfer_gdn_prefill_default(model_runner: ModelRunner) -> Optional[str]:
+     chunk_size = get_schedule().chunked_prefill_size
+     config = hybrid_gdn_config(model_runner.model_config)
++
++    _mamba_dtype = model_runner.req_to_token_pool.mamba_pool.mamba_cache.temporal.dtype
++    _gate("dynamic_chunking off",
++          get_schedule().enable_dynamic_chunking,
++          not get_schedule().enable_dynamic_chunking)
++    _gate("chunk_size is not None", chunk_size, chunk_size is not None)
++    _gate(f"1 <= chunk_size({chunk_size}) <= max_chunk({max_chunk})",
++          chunk_size, isinstance(chunk_size, int) and 1 <= chunk_size <= max_chunk)
++    _gate("linear_key_head_dim == 128",
++          getattr(config, "linear_key_head_dim", None),
++          getattr(config, "linear_key_head_dim", None) == 128)
++    _gate("linear_value_head_dim == 128",
++          getattr(config, "linear_value_head_dim", None),
++          getattr(config, "linear_value_head_dim", None) == 128)
++    _gate(f"mamba temporal dtype == {expected_state_dtype}",
++          _mamba_dtype, _mamba_dtype == expected_state_dtype)
++
+     if (
+         get_schedule().enable_dynamic_chunking
+         or chunk_size is None
+@@ -222,6 +281,10 @@ def flashinfer_gdn_prefill_default(model_runner: ModelRunner) -> Optional[str]:
+     from sglang.srt.layers.attention.linear.kernels.gdn_flashinfer import (
+         is_flashinfer_gdn_prefill_available,
+     )
+ 
++    _avail = is_flashinfer_gdn_prefill_available()
++    _gate("flashinfer kernels available", _avail, _avail)
++
+     if not is_flashinfer_gdn_prefill_available():
+         return None
